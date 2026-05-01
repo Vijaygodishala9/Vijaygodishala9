@@ -6,6 +6,7 @@ import { CommentaryBroadcaster } from "./CommentaryBroadcaster";
 import { MatchRegistry } from "./MatchRegistry";
 import { PushService } from "./PushService";
 import { PersonaMode } from "./RoanuzCricketSocket";
+import { MockMatchSimulator } from "./MockMatchSimulator";
 
 dotenv.config({ override: true });
 
@@ -34,7 +35,7 @@ async function main() {
 
   app.get("/", async () => ({
     message: "Cricket Commentary SSE Server",
-    endpoints: ["/health", "/stream/:matchKey", "/match/:matchKey/state", "/push/vapid-public-key", "/push/subscribe"],
+    endpoints: ["/health", "/stream/:matchKey", "/mock-stream/:matchKey", "/match/:matchKey/state", "/push/vapid-public-key", "/push/subscribe"],
   }));
 
   // SSE stream endpoint
@@ -77,6 +78,52 @@ async function main() {
       clearInterval(heartbeat);
       broadcaster.remove(clientId);
       registry.teardownIfEmpty(matchKey);
+    });
+
+    await new Promise(() => {});
+  });
+
+  // ── Mock SSE stream — no Roanuz needed ──────────────────────────────────────
+  app.get<{
+    Params: { matchKey: string };
+    Querystring: { persona?: string };
+  }>("/mock-stream/:matchKey", async (req, reply) => {
+    const persona = (req.query.persona ?? "casual_hype") as PersonaMode;
+
+    if (!VALID_PERSONAS.includes(persona)) {
+      return reply.code(400).send({ error: `Invalid persona. Choose: ${VALID_PERSONAS.join(", ")}` });
+    }
+
+    reply.raw.writeHead(200, {
+      "Content-Type":                     "text/event-stream",
+      "Cache-Control":                    "no-cache, no-transform",
+      "Connection":                       "keep-alive",
+      "X-Accel-Buffering":                "no",
+      "Access-Control-Allow-Origin":      process.env.FRONTEND_URL ?? "http://localhost:5174",
+      "Access-Control-Allow-Credentials": "true",
+    });
+
+    const activePersonas = new Set<PersonaMode>([persona]);
+
+    const sim = new MockMatchSimulator(() => [...activePersonas]);
+
+    const send = (event: string, data: unknown) => {
+      try {
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        sim.stop();
+      }
+    };
+
+    sim.start(send, 5_000);
+
+    const heartbeat = setInterval(() => {
+      try { reply.raw.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); }
+    }, 25_000);
+
+    req.raw.on("close", () => {
+      clearInterval(heartbeat);
+      sim.stop();
     });
 
     await new Promise(() => {});
