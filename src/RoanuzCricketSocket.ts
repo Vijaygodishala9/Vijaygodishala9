@@ -25,11 +25,11 @@ export type PersonaMode =
   | "hindi" | "tamil" | "telugu" | "bengali" | "marathi" | "kannada" | "malayalam";
 
 export interface RoanuzConfig {
-  projectKey: string;   // from Roanuz console
-  apiKey: string;       // from Roanuz console
-  matchKey: string;     // e.g. "indpak_2024_t20_01"
+  projectKey: string;
+  apiKey: string;
+  matchKey: string;
   persona?: PersonaMode;
-  getActivePersonas?: () => PersonaMode[];  // Get all active personas for multi-client support
+  getActivePersonas?: () => PersonaMode[];
   onCommentary?: (token: string, eventType: string, persona: PersonaMode) => void;
   onFantasy?: (advice: string, eventType: string, batsman: string) => void;
   onNotableEvent?: (payload: { title: string; body: string; tag: string }) => void;
@@ -49,14 +49,47 @@ interface BallEvent {
   ball: number;
 }
 
+// ─── NEW: player-level types sent to the frontend ─────────────────────────────
+
+/** A batter currently at the crease */
+interface Batter {
+  name:      string;
+  runs:      number;
+  balls:     number;
+  fours:     number;
+  sixes:     number;
+  on_strike: boolean;   // true = currently facing
+}
+
+/** A bowler who has bowled this innings */
+interface Bowler {
+  name:     string;
+  overs:    string;    // e.g. "3.4"
+  runs:     number;
+  wickets:  number;
+  economy:  string;   // e.g. "8.25"
+  current:  boolean;  // true = bowling this over
+}
+
+// ─── MatchState (extended) ────────────────────────────────────────────────────
+
 interface MatchState {
-  score: string;
-  wickets: number;
-  overs: string;
-  run_rate: string;
-  batting_team: string;
-  bowling_team: string;
-  last_ball?: BallEvent;
+  score:          string;
+  wickets:        number;
+  overs:          string;
+  run_rate:       string;
+  batting_team:   string;
+  bowling_team:   string;
+  last_ball?:     BallEvent;
+  // Fields consumed by the frontend scoreboard
+  target?:        number;
+  required_rate?: string;
+  partnership?:   string;
+  last_wicket?:   string;
+  last_5_overs?:  string;
+  // Live player tables
+  batters?:       Batter[];
+  bowlers?:       Bowler[];
 }
 
 // ─── Persona system prompts ───────────────────────────────────────────────────
@@ -101,13 +134,11 @@ export class RoanuzCricketSocket {
 
   // ─── Public API ─────────────────────────────────────────────────────────────
 
-  /** Connect to Roanuz, authenticate, and start receiving ball events */
   async connect(): Promise<void> {
     await this.refreshToken();
     this.createSocket();
   }
 
-  /** Gracefully disconnect and clean up */
   destroy(): void {
     this.isDestroyed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -119,7 +150,6 @@ export class RoanuzCricketSocket {
     console.log("[Roanuz] Connection destroyed.");
   }
 
-  /** Switch persona on the fly without reconnecting */
   setPersona(persona: PersonaMode): void {
     this.config.persona = persona;
     console.log(`[Roanuz] Persona switched to: ${persona}`);
@@ -132,7 +162,6 @@ export class RoanuzCricketSocket {
     const url = `${this.API_BASE}/core/${this.config.projectKey}/auth/`;
     const res = await axios.post(url, { api_key: this.config.apiKey });
     this.accessToken = res.data?.data?.token;
-    // Token expires in 24h — schedule refresh at 23h to avoid expiry mid-match
     this.tokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000;
     console.log("[Roanuz] Token refreshed. Valid for 23 hours.");
     this.scheduleTokenRefresh();
@@ -143,7 +172,6 @@ export class RoanuzCricketSocket {
     setTimeout(async () => {
       if (!this.isDestroyed) {
         await this.refreshToken();
-        // Re-subscribe after token refresh
         if (this.socket?.connected) this.emitSubscribe();
       }
     }, msUntilRefresh);
@@ -154,17 +182,17 @@ export class RoanuzCricketSocket {
   private createSocket(): void {
     this.socket = io(this.SOCKET_URL, {
       path: this.SOCKET_PATH,
-      reconnection: false,        // We manage reconnection ourselves
+      reconnection: false,
       transports: ["websocket"],
       timeout: 10_000,
     });
 
-    this.socket.on("connect",        () => this.onConnect());
-    this.socket.on("on_match_joined",  (d) => this.onMatchJoined(d));
-    this.socket.on("on_match_update",  (d) => this.onMatchUpdate(d));
-    this.socket.on("on_error",         (d) => this.onSocketError(d));
-    this.socket.on("disconnect",       (r) => this.onDisconnect(r));
-    this.socket.on("connect_error",    (e) => this.onConnectError(e));
+    this.socket.on("connect",         () => this.onConnect());
+    this.socket.on("on_match_joined", (d) => this.onMatchJoined(d));
+    this.socket.on("on_match_update", (d) => this.onMatchUpdate(d));
+    this.socket.on("on_error",        (d) => this.onSocketError(d));
+    this.socket.on("disconnect",      (r) => this.onDisconnect(r));
+    this.socket.on("connect_error",   (e) => this.onConnectError(e));
   }
 
   private onConnect(): void {
@@ -212,14 +240,12 @@ export class RoanuzCricketSocket {
       return;
     }
 
-    // Exponential backoff: 1s, 2s, 4s, 8s ... capped at 60s
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 60_000);
     this.reconnectAttempts++;
     console.log(`[Roanuz] Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})...`);
 
     this.reconnectTimer = setTimeout(async () => {
       if (this.isDestroyed) return;
-      // Token may have expired during disconnect — refresh if needed
       if (Date.now() > this.tokenExpiresAt - 60_000) await this.refreshToken();
       this.socket?.disconnect();
       this.socket = null;
@@ -227,7 +253,7 @@ export class RoanuzCricketSocket {
     }, delay);
   }
 
-  // ─── Match subscription REST calls (for subscribe/unsubscribe lifecycle) ─────
+  // ─── Match subscription REST calls ──────────────────────────────────────────
 
   async subscribeMatch(): Promise<void> {
     const url = `${this.API_BASE}/cricket/${this.config.projectKey}/match/${this.config.matchKey}/subscribe/`;
@@ -255,55 +281,131 @@ export class RoanuzCricketSocket {
     const data = this.safeParse(rawData);
     if (!data) return;
 
-    // Update cached match state
     this.matchState = this.extractMatchState(data);
 
-    // Identify what kind of event this is
     const eventType = this.classifyEvent(data);
     console.log(`[Roanuz] Event: ${eventType} | Score: ${this.matchState.score}/${this.matchState.wickets} (${this.matchState.overs})`);
 
-    // Trigger Claude commentary for significant events
     if (this.shouldCommentOn(eventType)) {
       this.streamCommentary(eventType, this.matchState).catch(console.error);
     }
   }
 
+  // ─── extractMatchState (updated) ─────────────────────────────────────────────
+  // Parses the full Roanuz on_match_update payload into the MatchState shape
+  // the frontend consumes. All new fields use safe optional chaining so the
+  // app degrades gracefully if Roanuz doesn't include a section.
+
   private extractMatchState(data: any): MatchState {
-    const innings = data?.score?.innings?.[0] ?? {};
-    const lastBall = data?.score?.recent_ball ?? {};
+    const innings  = data?.score?.innings?.[0] ?? {};
+    const lastBall = data?.score?.recent_ball  ?? {};
+
+    // ── Chase / target fields (second innings only) ──────────────────────────
+    const target       = data?.score?.target?.runs ?? innings?.target ?? undefined;
+    const requiredRate = innings?.required_run_rate
+      ? String(parseFloat(innings.required_run_rate).toFixed(2))
+      : undefined;
+
+    // ── Partnership ──────────────────────────────────────────────────────────
+    // Roanuz v5: data.score.partnership = { runs, balls }
+    const pship = data?.score?.partnership;
+    const partnership = pship
+      ? `${pship.runs ?? 0}(${pship.balls ?? 0})`
+      : undefined;
+
+    // ── Last wicket ──────────────────────────────────────────────────────────
+    // Roanuz v5: data.score.last_wicket = { player: { name }, runs, balls }
+    const lw = data?.score?.last_wicket;
+    const lastWicket = lw
+      ? `${lw.player?.name ?? "?"} ${lw.runs ?? 0}(${lw.balls ?? 0})`
+      : undefined;
+
+    // ── Last 5 overs ─────────────────────────────────────────────────────────
+    // Roanuz v5: innings.last_five_overs = "44" (runs as string/number)
+    const last5 = innings?.last_five_overs ?? innings?.last5overs ?? undefined;
+    const last5Overs = last5 !== undefined ? String(last5) : undefined;
+
+    // ── Batters ──────────────────────────────────────────────────────────────
+    // Roanuz v5: data.score.batting = [ { player: {name}, runs, balls, fours, sixes, is_striker }, ... ]
+    // Only current batters (max 2) are present in a live update.
+    const rawBatting: any[] = data?.score?.batting ?? [];
+    const batters: Batter[] = rawBatting
+      .filter((b: any) => b?.player?.name)
+      .map((b: any) => ({
+        name:      b.player.name,
+        runs:      Number(b.runs  ?? b.score ?? 0),
+        balls:     Number(b.balls ?? 0),
+        fours:     Number(b.fours ?? 0),
+        sixes:     Number(b.sixes ?? 0),
+        on_strike: Boolean(b.is_striker ?? b.on_strike ?? false),
+      }));
+
+    // ── Bowlers ──────────────────────────────────────────────────────────────
+    // Roanuz v5: data.score.bowling = [ { player: {name}, overs, runs, wickets, economy, is_current_bowler }, ... ]
+    // All bowlers who have sent at least one delivery appear here.
+    const rawBowling: any[] = data?.score?.bowling ?? [];
+    const bowlers: Bowler[] = rawBowling
+      .filter((b: any) => b?.player?.name)
+      .map((b: any) => {
+        const overs   = b.overs ?? b.over ?? "0.0";
+        const runs    = Number(b.runs ?? b.runs_given ?? 0);
+        const wickets = Number(b.wickets ?? 0);
+        // Economy: use provided value or compute from overs + runs
+        const computedEco = parseFloat(overs) > 0
+          ? (runs / parseFloat(overs)).toFixed(2)
+          : "0.00";
+        return {
+          name:    b.player.name,
+          overs:   String(overs),
+          runs,
+          wickets,
+          economy: b.economy ? String(parseFloat(b.economy).toFixed(2)) : computedEco,
+          current: Boolean(b.is_current_bowler ?? b.current ?? false),
+        };
+      });
+
+    // ── last_ball ────────────────────────────────────────────────────────────
+    const lastBallParsed = lastBall?.ball_number ? {
+      ball_number: lastBall.ball_number,
+      batsman:     lastBall.batsman?.name ?? "Batter",
+      bowler:      lastBall.bowler?.name  ?? "Bowler",
+      runs:        lastBall.runs    ?? 0,
+      extras:      lastBall.extras  ?? 0,
+      wicket:      lastBall.wicket  ?? false,
+      wicket_type: lastBall.wicket_type ?? "",
+      commentary:  lastBall.commentary  ?? "",
+      over:        Math.floor(lastBall.ball_number),
+      ball:        Math.round((lastBall.ball_number % 1) * 10),
+    } : undefined;
+
     return {
-      score:       innings?.score ?? "0",
-      wickets:     innings?.wickets ?? 0,
-      overs:       innings?.overs ?? "0.0",
-      run_rate:    innings?.run_rate ?? "0.00",
-      batting_team: data?.score?.batting_team?.name ?? "Team A",
-      bowling_team: data?.score?.bowling_team?.name ?? "Team B",
-      last_ball: lastBall?.ball_number ? {
-        ball_number: lastBall.ball_number,
-        batsman:     lastBall.batsman?.name ?? "Batter",
-        bowler:      lastBall.bowler?.name  ?? "Bowler",
-        runs:        lastBall.runs ?? 0,
-        extras:      lastBall.extras ?? 0,
-        wicket:      lastBall.wicket ?? false,
-        wicket_type: lastBall.wicket_type ?? "",
-        commentary:  lastBall.commentary ?? "",
-        over:        Math.floor(lastBall.ball_number),
-        ball:        Math.round((lastBall.ball_number % 1) * 10),
-      } : undefined,
+      score:         innings?.score      ?? "0",
+      wickets:       innings?.wickets    ?? 0,
+      overs:         innings?.overs      ?? "0.0",
+      run_rate:      innings?.run_rate   ?? "0.00",
+      batting_team:  data?.score?.batting_team?.name ?? "Team A",
+      bowling_team:  data?.score?.bowling_team?.name ?? "Team B",
+      last_ball:     lastBallParsed,
+      target,
+      required_rate: requiredRate,
+      partnership,
+      last_wicket:   lastWicket,
+      last_5_overs:  last5Overs,
+      batters:       batters.length  > 0 ? batters  : undefined,
+      bowlers:       bowlers.length  > 0 ? bowlers  : undefined,
     };
   }
 
   private classifyEvent(data: any): string {
     const ball = data?.score?.recent_ball;
     if (!ball) return "score_update";
-    if (ball.wicket)         return "wicket";
-    if (ball.runs === 6)     return "six";
-    if (ball.runs === 4)     return "four";
+    if (ball.wicket)       return "wicket";
+    if (ball.runs === 6)   return "six";
+    if (ball.runs === 4)   return "four";
     if (ball.ball_number && String(ball.ball_number).endsWith(".6")) return "over_complete";
     return "dot_or_single";
   }
 
-  // Only generate commentary for high-value events (saves API cost on dots)
   private shouldCommentOn(eventType: string): boolean {
     return ["wicket", "six", "four", "over_complete"].includes(eventType);
   }
@@ -313,30 +415,27 @@ export class RoanuzCricketSocket {
   private async streamCommentary(eventType: string, state: MatchState): Promise<void> {
     const ball = state.last_ball;
     const userPrompt = this.buildCommentaryPrompt(eventType, state, ball);
-    
-    // Get all active personas for this match - generate commentary for each
+
     const activePersonas = this.config.getActivePersonas?.() ?? [this.config.persona ?? "casual_hype"];
     const uniquePersonas = [...new Set(activePersonas)];
-    
+
     console.log(`[Claude] Generating commentary for personas: ${uniquePersonas.join(", ")}`);
-    
-    // Generate commentary for each active persona in parallel
+
     await Promise.all(uniquePersonas.map(async (persona) => {
       const systemPrompt = PERSONA_PROMPTS[persona];
-      
-      // Signal a new commentary line to SSE clients before streaming tokens
+
       this.config.onCommentary?.("", eventType, persona);
-      
+
       let fullText = "";
-      
+
       try {
         const stream = this.anthropic.messages.stream({
-          model: "claude-sonnet-4-6",
+          model:      "claude-sonnet-4-6",
           max_tokens: 80,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }],
+          system:     systemPrompt,
+          messages:   [{ role: "user", content: userPrompt }],
         });
-        
+
         for await (const chunk of stream) {
           if (
             chunk.type === "content_block_delta" &&
@@ -344,11 +443,10 @@ export class RoanuzCricketSocket {
           ) {
             const token = chunk.delta.text;
             fullText += token;
-            // Stream each token to the caller in real time
             this.config.onCommentary?.(token, eventType, persona);
           }
         }
-        
+
         console.log(`[Claude] [${persona}] [${eventType}] ${fullText}`);
       } catch (err) {
         console.error(`[Claude] Error generating ${persona} commentary:`, err);
