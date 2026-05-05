@@ -1,6 +1,6 @@
 /**
- * RoanuzCricketSocket.ts
- * Production-grade Socket.IO handler for Roanuz Cricket API v5
+ * HighlightlyCricketSocket.ts
+ * Production-grade Socket.IO handler for Highlightly Cricket API v5
  * Covers: auth + token refresh, match subscription, event parsing,
  * reconnection with backoff, and Claude streaming commentary pipeline.
  *
@@ -24,7 +24,7 @@ export type PersonaMode =
   | "casual_hype" | "stats_nerd"
   | "hindi" | "tamil" | "telugu" | "bengali" | "marathi" | "kannada" | "malayalam";
 
-export interface RoanuzConfig {
+export interface HighlightlyConfig {
   projectKey: string;
   apiKey: string;
   matchKey: string;
@@ -108,7 +108,7 @@ const PERSONA_PROMPTS: Record<PersonaMode, string> = {
 
 // ─── Main class ───────────────────────────────────────────────────────────────
 
-export class RoanuzCricketSocket {
+export class HighlightlyCricketSocket {
   private socket: Socket | null = null;
   private accessToken: string | null = null;
   private tokenExpiresAt: number = 0;
@@ -118,14 +118,26 @@ export class RoanuzCricketSocket {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isDestroyed = false;
 
-  private readonly SOCKET_URL = "http://socket.sports.roanuz.com/cricket";
-  private readonly SOCKET_PATH = "/v5/websocket";
-  private readonly API_BASE = "https://api.sports.roanuz.com/v5";
+  private readonly BASE_URL = process.env.HIGHLIGHTLY_BASE_URL ?? "https://cricket.highlightly.net";
+  private readonly API_BASE = (() => {
+    const base = process.env.HIGHLIGHTLY_API_BASE_URL?.replace(/\/+$/, "");
+    const host = process.env.HIGHLIGHTLY_API_HOST;
+    if (host) {
+      console.log(`[Highlightly] HIGHLIGHTLY_API_HOST detected; using https://${host} as API_BASE`);
+      return `https://${host}`;
+    }
+    return base ?? this.BASE_URL;
+  })();
+  private readonly SOCKET_URL = process.env.HIGHLIGHTLY_SOCKET_URL ?? this.API_BASE;
+  private readonly SOCKET_PATH = process.env.HIGHLIGHTLY_SOCKET_PATH ?? "/v5/websocket";
 
   private anthropic: Anthropic;
-  private config: RoanuzConfig;
+  private config: HighlightlyConfig;
 
-  constructor(config: RoanuzConfig) {
+  constructor(config: HighlightlyConfig) {
+    if (!config.projectKey || !config.apiKey || !config.matchKey) {
+      throw new Error("Highlightly projectKey, apiKey, and matchKey are required.");
+    }
     this.config = { persona: "casual_hype", ...config };
     this.anthropic = new Anthropic({
       apiKey: process.env.ANTHROPIC_API_KEY!,
@@ -147,24 +159,85 @@ export class RoanuzCricketSocket {
       this.socket.disconnect();
       this.socket = null;
     }
-    console.log("[Roanuz] Connection destroyed.");
+    console.log("[Highlightly] Connection destroyed.");
   }
 
   setPersona(persona: PersonaMode): void {
     this.config.persona = persona;
-    console.log(`[Roanuz] Persona switched to: ${persona}`);
+    console.log(`[Highlightly] Persona switched to: ${persona}`);
   }
 
   // ─── Auth ────────────────────────────────────────────────────────────────────
 
   private async refreshToken(): Promise<void> {
-    console.log("[Roanuz] Refreshing access token...");
+    console.log("[Highlightly] Refreshing access token...");
     const url = `${this.API_BASE}/core/${this.config.projectKey}/auth/`;
-    const res = await axios.post(url, { api_key: this.config.apiKey });
-    this.accessToken = res.data?.data?.token;
-    this.tokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000;
-    console.log("[Roanuz] Token refreshed. Valid for 23 hours.");
-    this.scheduleTokenRefresh();
+    console.log(`[Highlightly] Auth URL: ${url}`);
+    console.log(`[Highlightly] API Key: ${this.config.apiKey.substring(0, 10)}...`);
+
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const res = await axios.post(url, { api_key: this.config.apiKey }, {
+          headers: this.makeApiHeaders(),
+        });
+        console.log(`[Highlightly] Auth response status: ${res.status}`);
+        this.accessToken = res.data?.data?.token;
+        if (!this.accessToken) {
+          console.error("[Highlightly] No token in response:", res.data);
+          throw new Error("No access token received");
+        }
+        this.tokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000;
+        console.log("[Highlightly] Token refreshed. Valid for 23 hours.");
+        this.scheduleTokenRefresh();
+        return; // Success, exit
+      } catch (error: any) {
+        console.error(`[Highlightly] Token refresh attempt ${attempt + 1} failed:`, error.message);
+        if (error.response) {
+          console.error("[Highlightly] Response status:", error.response.status);
+          console.error("[Highlightly] Response data:", error.response.data);
+          if ((error.response.status === 429 || error.response.status === 403 || error.response.status === 404) && attempt < maxRetries - 1) {
+            const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+            console.log(`[Highlightly] API error. Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+        if (attempt === maxRetries - 1) {
+          // Final attempt failed, use API key as token
+          console.log("[Highlightly] Using API key as token fallback");
+          this.accessToken = this.config.apiKey;
+          this.tokenExpiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
+          this.scheduleTokenRefresh();
+          return;
+        }
+      }
+    }
+  }
+
+  private makeApiHeaders(includeToken = false): Record<string, string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+
+    const useRapidApiHeaders =
+      this.API_BASE.includes("rapidapi.com") ||
+      process.env.HIGHLIGHTLY_API_HOST?.includes("rapidapi.com");
+
+    if (useRapidApiHeaders) {
+      headers["x-rapidapi-key"] = this.config.apiKey;
+      if (process.env.HIGHLIGHTLY_API_HOST) {
+        headers["x-rapidapi-host"] = process.env.HIGHLIGHTLY_API_HOST;
+      }
+    } else {
+      headers["rs-token"] = this.config.apiKey;
+    }
+
+    if (includeToken && this.accessToken) {
+      headers["rs-token"] = this.accessToken;
+    }
+
+    return headers;
   }
 
   private scheduleTokenRefresh(): void {
@@ -180,6 +253,11 @@ export class RoanuzCricketSocket {
   // ─── Socket lifecycle ────────────────────────────────────────────────────────
 
   private createSocket(): void {
+    console.log(`[Highlightly] Creating socket connection`);
+    console.log(`[Highlightly] SOCKET_URL=${this.SOCKET_URL}`);
+    console.log(`[Highlightly] SOCKET_PATH=${this.SOCKET_PATH}`);
+    console.log(`[Highlightly] Project=${this.config.projectKey} Match=${this.config.matchKey} TokenLoaded=${Boolean(this.accessToken)}`);
+
     this.socket = io(this.SOCKET_URL, {
       path: this.SOCKET_PATH,
       reconnection: false,
@@ -196,12 +274,14 @@ export class RoanuzCricketSocket {
   }
 
   private onConnect(): void {
-    console.log("[Roanuz] Socket connected. Joining match...");
+    console.log(`[Highlightly] Socket connected (id=${this.socket?.id ?? "unknown"}). Joining match ${this.config.matchKey}...`);
     this.reconnectAttempts = 0;
     this.emitSubscribe();
   }
 
   private emitSubscribe(): void {
+    const tokenPreview = this.accessToken ? `${String(this.accessToken).slice(0, 12)}...` : "<none>";
+    console.log(`[Highlightly] Emitting connect_to_match token=${tokenPreview} match_key=${this.config.matchKey}`);
     this.socket?.emit("connect_to_match", {
       token: this.accessToken,
       match_key: this.config.matchKey,
@@ -210,23 +290,23 @@ export class RoanuzCricketSocket {
 
   private onMatchJoined(data: any): void {
     const key = data?.key ?? this.config.matchKey;
-    console.log(`[Roanuz] Match joined: ${key}`);
+    console.log(`[Highlightly] Match joined: ${key}`);
   }
 
   private onDisconnect(reason: string): void {
-    console.warn(`[Roanuz] Disconnected: ${reason}`);
+    console.warn(`[Highlightly] Disconnected: ${reason}`);
     if (!this.isDestroyed) this.scheduleReconnect();
   }
 
   private onConnectError(err: Error): void {
-    console.error(`[Roanuz] Connection error: ${err.message}`);
+    console.error(`[Highlightly] Connection error: ${err.message}`);
     if (!this.isDestroyed) this.scheduleReconnect();
   }
 
   private onSocketError(data: any): void {
     const parsed = this.safeParse(data);
     const msg = parsed?.message ?? "Unknown socket error";
-    console.error(`[Roanuz] Server error: ${msg}`);
+    console.error(`[Highlightly] Server error: ${msg}`);
     this.config.onError?.(new Error(msg));
   }
 
@@ -234,7 +314,7 @@ export class RoanuzCricketSocket {
 
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.MAX_RECONNECT) {
-      const err = new Error(`[Roanuz] Max reconnect attempts (${this.MAX_RECONNECT}) reached.`);
+      const err = new Error(`[Highlightly] Max reconnect attempts (${this.MAX_RECONNECT}) reached.`);
       console.error(err.message);
       this.config.onError?.(err);
       return;
@@ -242,7 +322,7 @@ export class RoanuzCricketSocket {
 
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 60_000);
     this.reconnectAttempts++;
-    console.log(`[Roanuz] Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})...`);
+    console.log(`[Highlightly] Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})...`);
 
     this.reconnectTimer = setTimeout(async () => {
       if (this.isDestroyed) return;
@@ -258,18 +338,18 @@ export class RoanuzCricketSocket {
   async subscribeMatch(): Promise<void> {
     const url = `${this.API_BASE}/cricket/${this.config.projectKey}/match/${this.config.matchKey}/subscribe/`;
     await axios.post(url, { method: "web_socket" }, {
-      headers: { "rs-token": this.accessToken! },
+      headers: this.makeApiHeaders(true),
     });
-    console.log(`[Roanuz] Match ${this.config.matchKey} subscribed via REST.`);
+    console.log(`[Highlightly] Match ${this.config.matchKey} subscribed via REST.`);
   }
 
   async unsubscribeMatch(): Promise<void> {
     try {
       const url = `${this.API_BASE}/cricket/${this.config.projectKey}/match/${this.config.matchKey}/unsubscribe/`;
       await axios.post(url, { method: "web_socket" }, {
-        headers: { "rs-token": this.accessToken! },
+        headers: this.makeApiHeaders(true),
       });
-      console.log(`[Roanuz] Match ${this.config.matchKey} unsubscribed.`);
+      console.log(`[Highlightly] Match ${this.config.matchKey} unsubscribed.`);
     } catch {
       // Best-effort on teardown
     }
@@ -278,13 +358,27 @@ export class RoanuzCricketSocket {
   // ─── Event parsing ───────────────────────────────────────────────────────────
 
   private onMatchUpdate(rawData: any): void {
+    if (!rawData) {
+      console.warn("[Highlightly] Received on_match_update with empty payload");
+      return;
+    }
+    const preview = typeof rawData === "string"
+      ? rawData.slice(0, 250)
+      : rawData && typeof rawData === "object"
+        ? JSON.stringify(Object.keys(rawData)).slice(0, 200)
+        : String(rawData).slice(0, 250);
+    console.log(`[Highlightly] Received on_match_update payload: ${preview}`);
+
     const data = this.safeParse(rawData);
-    if (!data) return;
+    if (!data) {
+      console.error("[Highlightly] Failed to parse on_match_update payload", rawData);
+      return;
+    }
 
     this.matchState = this.extractMatchState(data);
 
     const eventType = this.classifyEvent(data);
-    console.log(`[Roanuz] Event: ${eventType} | Score: ${this.matchState.score}/${this.matchState.wickets} (${this.matchState.overs})`);
+    console.log(`[Highlightly] Parsed event ${eventType} | Score: ${this.matchState.score}/${this.matchState.wickets} (${this.matchState.overs})`);
 
     if (this.shouldCommentOn(eventType)) {
       this.streamCommentary(eventType, this.matchState).catch(console.error);
@@ -292,9 +386,9 @@ export class RoanuzCricketSocket {
   }
 
   // ─── extractMatchState (updated) ─────────────────────────────────────────────
-  // Parses the full Roanuz on_match_update payload into the MatchState shape
+// Parses the full Highlightly on_match_update payload into the MatchState shape
   // the frontend consumes. All new fields use safe optional chaining so the
-  // app degrades gracefully if Roanuz doesn't include a section.
+  // app degrades gracefully if Highlightly doesn't include a section.
 
   private extractMatchState(data: any): MatchState {
     const innings  = data?.score?.innings?.[0] ?? {};
@@ -307,26 +401,26 @@ export class RoanuzCricketSocket {
       : undefined;
 
     // ── Partnership ──────────────────────────────────────────────────────────
-    // Roanuz v5: data.score.partnership = { runs, balls }
+    // Highlightly v5: data.score.partnership = { runs, balls }
     const pship = data?.score?.partnership;
     const partnership = pship
       ? `${pship.runs ?? 0}(${pship.balls ?? 0})`
       : undefined;
 
     // ── Last wicket ──────────────────────────────────────────────────────────
-    // Roanuz v5: data.score.last_wicket = { player: { name }, runs, balls }
+    // Highlightly v5: data.score.last_wicket = { player: { name }, runs, balls }
     const lw = data?.score?.last_wicket;
     const lastWicket = lw
       ? `${lw.player?.name ?? "?"} ${lw.runs ?? 0}(${lw.balls ?? 0})`
       : undefined;
 
     // ── Last 5 overs ─────────────────────────────────────────────────────────
-    // Roanuz v5: innings.last_five_overs = "44" (runs as string/number)
+    // Highlightly v5: innings.last_five_overs = "44" (runs as string/number)
     const last5 = innings?.last_five_overs ?? innings?.last5overs ?? undefined;
     const last5Overs = last5 !== undefined ? String(last5) : undefined;
 
     // ── Batters ──────────────────────────────────────────────────────────────
-    // Roanuz v5: data.score.batting = [ { player: {name}, runs, balls, fours, sixes, is_striker }, ... ]
+    // Highlightly v5: data.score.batting = [ { player: {name}, runs, balls, fours, sixes, is_striker }, ... ]
     // Only current batters (max 2) are present in a live update.
     const rawBatting: any[] = data?.score?.batting ?? [];
     const batters: Batter[] = rawBatting
@@ -341,7 +435,7 @@ export class RoanuzCricketSocket {
       }));
 
     // ── Bowlers ──────────────────────────────────────────────────────────────
-    // Roanuz v5: data.score.bowling = [ { player: {name}, overs, runs, wickets, economy, is_current_bowler }, ... ]
+    // Highlightly v5: data.score.bowling = [ { player: {name}, overs, runs, wickets, economy, is_current_bowler }, ... ]
     // All bowlers who have sent at least one delivery appear here.
     const rawBowling: any[] = data?.score?.bowling ?? [];
     const bowlers: Bowler[] = rawBowling
@@ -491,5 +585,9 @@ Generate commentary now.`;
 
   getMatchState(): MatchState | null {
     return this.matchState;
+  }
+
+  isConnected(): boolean {
+    return this.socket?.connected ?? false;
   }
 }

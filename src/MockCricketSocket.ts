@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { PersonaMode } from "./RoanuzCricketSocket";
+import { PersonaMode } from "./HighlightlyCricketSocket";
 import { CommentaryCache } from "./CommentaryCache";
 
 export interface NotableEventPayload {

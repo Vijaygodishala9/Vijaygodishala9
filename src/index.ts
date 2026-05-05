@@ -3,15 +3,15 @@
  * Run: npx ts-node src/index.ts
  */
 
-import { RoanuzCricketSocket, PersonaMode } from "./RoanuzCricketSocket";
+import { HighlightlyCricketSocket, PersonaMode } from "./HighlightlyCricketSocket";
 
 // Tracks the current commentary line being streamed
 let currentLine = "";
 
-const client = new RoanuzCricketSocket({
-  projectKey: process.env.ROANUZ_PROJECT_KEY!,
-  apiKey:     process.env.ROANUZ_API_KEY!,
-  matchKey:   process.env.ROANUZ_MATCH_KEY ?? "indpak_2024_t20_01",
+const client = new HighlightlyCricketSocket({
+  projectKey: process.env.HIGHLIGHTLY_PROJECT_KEY!,
+  apiKey:     process.env.HIGHLIGHTLY_API_KEY!,
+  matchKey:   process.env.HIGHLIGHTLY_MATCH_KEY ?? "live",
   persona:    (process.env.PERSONA as PersonaMode) ?? "casual_hype",
 
   // onCommentary fires for every streamed token — pipe to SSE, WebSocket, or stdout
@@ -34,9 +34,9 @@ const client = new RoanuzCricketSocket({
 });
 
 async function main() {
-  console.log("Connecting to Roanuz Cricket API...");
+  console.log("Connecting to Highlightly Cricket API...");
 
-  // Step 1: REST subscribe call (registers interest with Roanuz server)
+  // Step 1: REST subscribe call (registers interest with Highlightly server)
   // Do this before connecting the socket
   await client.subscribeMatch().catch((e) =>
     console.warn("[App] Subscribe REST failed (may already be subscribed):", e.message)

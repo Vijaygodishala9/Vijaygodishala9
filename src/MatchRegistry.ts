@@ -1,9 +1,9 @@
-import { RoanuzCricketSocket, PersonaMode } from "./RoanuzCricketSocket";
+import { HighlightlyCricketSocket, PersonaMode } from "./HighlightlyCricketSocket";
 import { MockCricketSocket } from "./MockCricketSocket";
 import { CommentaryBroadcaster } from "./CommentaryBroadcaster";
 import { PushService } from "./PushService";
 
-type AnySocket = RoanuzCricketSocket | MockCricketSocket;
+type AnySocket = HighlightlyCricketSocket | MockCricketSocket;
 
 export class MatchRegistry {
   private sockets: Map<string, AnySocket> = new Map();
@@ -16,7 +16,10 @@ export class MatchRegistry {
   }
 
   async ensureConnected(matchKey: string): Promise<void> {
-    if (this.sockets.has(matchKey)) return;
+    if (this.sockets.has(matchKey)) {
+      console.log(`[Registry] Socket already active for match: ${matchKey}`);
+      return;
+    }
     console.log(`[Registry] Spinning up socket for match: ${matchKey}`);
 
     const onCommentary = (token: string, eventType: string, persona: PersonaMode) => {
@@ -48,9 +51,9 @@ export class MatchRegistry {
           onNotableEvent,
           onError,
         })
-      : new RoanuzCricketSocket({
-          projectKey: process.env.ROANUZ_PROJECT_KEY!,
-          apiKey:     process.env.ROANUZ_API_KEY!,
+      : new HighlightlyCricketSocket({
+          projectKey: process.env.HIGHLIGHTLY_PROJECT_KEY!,
+          apiKey:     process.env.HIGHLIGHTLY_API_KEY!,
           matchKey,
           persona:    "casual_hype", // Default, will be overridden by getActivePersonas
           getActivePersonas,
@@ -60,9 +63,14 @@ export class MatchRegistry {
           onError,
         });
 
-    await socket.subscribeMatch().catch(() => {});
     await socket.connect();
+    await socket.subscribeMatch().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.warn(`[Registry] Subscribe REST failed for ${matchKey} (non-fatal, socket still active):`, message);
+    });
+
     this.sockets.set(matchKey, socket);
+    console.log(`[Registry] Socket registered for match: ${matchKey}`);
   }
 
   teardownIfEmpty(matchKey: string): void {
@@ -82,5 +90,18 @@ export class MatchRegistry {
 
   activeSockets(): string[] {
     return [...this.sockets.keys()];
+  }
+
+  socketStatus(): Array<{ matchKey: string; connected: boolean; hasState: boolean; hasClients: boolean }> {
+    return [...this.sockets.entries()].map(([matchKey, socket]) => {
+      const hasState = typeof (socket as any).getMatchState === "function" && Boolean((socket as any).getMatchState());
+      const connected = typeof (socket as any).isConnected === "function" && (socket as any).isConnected();
+      return {
+        matchKey,
+        connected,
+        hasState,
+        hasClients: this.broadcaster.clientCount(matchKey) > 0,
+      };
+    });
   }
 }

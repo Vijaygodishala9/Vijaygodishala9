@@ -1,7 +1,7 @@
 /**
  * mockSimulator.ts
  * Fires fake ball events through Claude → SSE → React UI
- * No Roanuz subscription needed for testing.
+ * No Highlightly subscription needed for testing.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import * as dotenv from "dotenv";

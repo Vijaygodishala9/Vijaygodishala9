@@ -27,12 +27,6 @@ export class CommentaryBroadcaster {
 
   register(client: SSEClient): void {
     this.clients.set(client.id, client);
-    this.send(client.id, "connected", {
-      clientId: client.id,
-      matchKey: client.matchKey,
-      persona: client.persona,
-      ts: Date.now(),
-    });
     console.log(`[SSE] Client ${client.id} connected (match: ${client.matchKey}, total: ${this.clients.size})`);
   }
 

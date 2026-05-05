@@ -57,7 +57,7 @@ interface CommentaryLine {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const MATCH_KEY = (import.meta as any).env?.VITE_MATCH_KEY ?? "indpak_2024_t20_01";
+const MATCH_KEY = (import.meta as any).env?.VITE_MATCH_KEY ?? "live";
 const SERVER    = (import.meta as any).env?.VITE_SERVER_URL ?? "http://localhost:3001";
 
 const PERSONAS: { id: Persona; label: string; lang: string; desc: string; accent: string }[] = [
@@ -280,7 +280,7 @@ function ScorecardTab({ matchState }: { matchState: MatchState | null }) {
           <div style={{ padding: "14px 0", textAlign: "center", fontSize: 12, color: "#3A4050" }}>
             Waiting for batting data…
           </div>
-        ) : batters.map((b, i) => {
+        ) : batters.map((b) => {
           const sr    = b.balls > 0 ? ((b.runs / b.balls) * 100).toFixed(1) : "0.0";
           const srNum = parseFloat(sr);
           return (
@@ -449,6 +449,8 @@ export default function App() {
   const [copiedId,       setCopiedId]       = useState<number | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem("cdo"));
   const [activeTab,      setActiveTab]      = useState<"feed" | "scorecard">("feed");
+  const [matchKey,       setMatchKey]       = useState<string>(MATCH_KEY);
+  const [matchTitle,     setMatchTitle]     = useState<string>("");
 
   const feedRef    = useRef<HTMLDivElement>(null);
   const esRef      = useRef<EventSource | null>(null);
@@ -461,6 +463,26 @@ export default function App() {
   const { stop } = useSpeech(persona);
 
   useEffect(() => { personaRef.current = persona; }, [persona]);
+
+  // ── Auto-discover live IPL match ──
+  useEffect(() => {
+    fetch(`${SERVER}/matches/live`)
+      .then(r => r.json())
+      .then(({ matches }) => {
+        if (!Array.isArray(matches) || matches.length === 0) return;
+        // Prefer IPL match; fallback to first live match
+        const ipl = matches.find((m: any) =>
+          /ipl|indian premier league/i.test(m.tournament?.name ?? m.competition?.name ?? m.league?.name ?? m.name ?? "")
+        ) ?? matches[0];
+        const key = ipl?.key ?? ipl?.match_key ?? ipl?.id;
+        if (key && key !== matchKey) {
+          setMatchKey(String(key));
+          const name = ipl?.name ?? ipl?.title ?? ipl?.tournament?.name ?? "";
+          if (name) setMatchTitle(name);
+        }
+      })
+      .catch(() => { /* fallback to env match key */ });
+  }, []);
 
   const shareCommentary = useCallback((line: CommentaryLine) => {
     const p    = PERSONAS.find(p => p.id === line.persona);
@@ -478,7 +500,7 @@ export default function App() {
     linesRef.current  = [];
     setLines([]);
 
-    const url = `${SERVER}/stream/${MATCH_KEY}?persona=${persona}`;
+    const url = `${SERVER}/stream/${matchKey}?persona=${persona}`;
     const es  = new EventSource(url);
     esRef.current = es;
 
@@ -530,7 +552,7 @@ export default function App() {
     es.onerror = () => { setConnected(false); };
 
     return () => { es.close(); stop(); };
-  }, [persona]);
+  }, [persona, matchKey]);
 
   const pctComplete = matchState?.target
     ? Math.min(100, (parseInt(matchState.score || "0") / matchState.target) * 100)
@@ -575,7 +597,7 @@ export default function App() {
               CRICKET<span style={{ color: "#4ECCA3" }}>DESK</span>
             </div>
             <div style={{ fontSize: 11, color: "#5A6478", letterSpacing: ".07em", textTransform: "uppercase", marginTop: 1 }}>
-              Follow live · no stream needed
+              {matchTitle || "Follow live · no stream needed"}
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,.05)", borderRadius: 8, padding: "5px 10px" }}>
