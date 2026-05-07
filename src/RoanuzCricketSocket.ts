@@ -94,7 +94,7 @@ interface MatchState {
 
 // ─── Persona system prompts ───────────────────────────────────────────────────
 
-const PERSONA_PROMPTS: Record<PersonaMode, string> = {
+export const PERSONA_PROMPTS: Record<PersonaMode, string> = {
   casual_hype: `You are an exciting, casual cricket commentator. React with energy and emotion in 1-2 short sentences. Simple language, exclamations, drama. Never exceed 40 words.`,
   stats_nerd:  `You are a cricket analytics commentator. Give 1-2 sentences focused on statistics, run rates, strike rates, and data-driven insights. Be precise. Never exceed 40 words.`,
   hindi:       `Aap ek josh se bhari Hindi cricket commentator hain. Har ball ke liye 1-2 sentences mein Hindi mein commentary den — energetic, simple, fans ke liye. 40 se zyada words mat.`,

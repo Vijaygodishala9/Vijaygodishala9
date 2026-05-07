@@ -6,7 +6,7 @@ import { CommentaryBroadcaster } from "./CommentaryBroadcaster";
 import { MatchRegistry } from "./MatchRegistry";
 import { PushService } from "./PushService";
 import { PersonaMode } from "./RoanuzCricketSocket";
-import { MockMatchSimulator } from "./MockMatchSimulator";
+import { MockMatchSimulator } from "./mockSimulator";
 
 dotenv.config({ override: true });
 
@@ -20,7 +20,8 @@ async function main() {
   const app = Fastify({ logger: { level: "warn" } });
   const broadcaster = new CommentaryBroadcaster();
   const push = new PushService();
-  const registry = new MatchRegistry(broadcaster, push);
+  const fallbackOnly = String(process.env.HIGHLIGHTLY_FALLBACK_ONLY).toLowerCase() === "true";
+  const registry = new MatchRegistry(broadcaster, push, fallbackOnly);
 
   await app.register(cors, {
     origin: process.env.FRONTEND_URL ?? "http://localhost:5174",
@@ -62,13 +63,20 @@ async function main() {
     const clientId = randomUUID();
     broadcaster.register({ id: clientId, matchKey, persona, reply, connectedAt: Date.now() });
 
-    await registry.ensureConnected(matchKey).catch((err) => {
-      broadcaster.send(clientId, "error", { message: err.message });
-    });
+    let socketError: Error | null = null;
+    try {
+      await registry.ensureConnected(matchKey);
+    } catch (err: any) {
+      socketError = err instanceof Error ? err : new Error(String(err));
+    }
 
-    const socket = registry.getSocket(matchKey);
-    const state = socket?.getMatchState();
-    if (state) broadcaster.send(clientId, "state", state);
+    registry.ensurePublicStatePolling(matchKey);
+    const initialState = await registry.getMatchState(matchKey);
+    if (initialState) {
+      broadcaster.send(clientId, "state", initialState);
+    } else if (socketError) {
+      broadcaster.send(clientId, "error", { message: socketError.message });
+    }
 
     const heartbeat = setInterval(() => {
       try { reply.raw.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); }
@@ -146,9 +154,9 @@ async function main() {
   app.get<{ Params: { matchKey: string } }>(
     "/match/:matchKey/state",
     async (req, reply) => {
-      const socket = registry.getSocket(req.params.matchKey);
-      if (!socket) return reply.code(404).send({ error: "Match not active" });
-      return socket.getMatchState() ?? { error: "No state yet" };
+      const state = await registry.getMatchState(req.params.matchKey);
+      if (!state) return reply.code(404).send({ error: "No match state available yet" });
+      return state;
     }
   );
 

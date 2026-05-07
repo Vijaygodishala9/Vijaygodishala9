@@ -25,6 +25,82 @@ const FAKE_EVENTS = [
   { type: "four",          batsman: "Virat Kohli",   bowler: "Haris Rauf",     runs: 4,  over: 10, ball: 5 },
 ];
 
+export class MockMatchSimulator {
+  private intervalId: NodeJS.Timeout | null = null;
+  private eventIndex = 0;
+  private getActivePersonas: () => string[];
+
+  constructor(getActivePersonas: () => string[]) {
+    this.getActivePersonas = getActivePersonas;
+  }
+
+  async start(send: (event: string, data: unknown) => void, intervalMs: number) {
+    this.intervalId = setInterval(async () => {
+      if (this.eventIndex >= FAKE_EVENTS.length) {
+        this.eventIndex = 0; // Loop back to start
+      }
+
+      const event = FAKE_EVENTS[this.eventIndex++];
+      const activePersonas = this.getActivePersonas();
+
+      if (activePersonas.length === 0) return;
+
+      // Use the first active persona for commentary
+      const persona = activePersonas[0];
+
+      try {
+        const commentary = await this.generateCommentary(event, persona);
+        send("commentary", {
+          text: commentary,
+          persona,
+          timestamp: new Date().toISOString(),
+          event: event
+        });
+      } catch (error) {
+        console.error("Error generating commentary:", error);
+        send("error", { message: "Failed to generate commentary" });
+      }
+    }, intervalMs);
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+
+  private async generateCommentary(event: typeof FAKE_EVENTS[0], persona: string): Promise<string> {
+    const prompt = `Match: India vs Pakistan T20
+Score: 87/2 in ${event.over}.${event.ball} overs (RR: 8.2)
+Event: ${event.type.toUpperCase()}
+Ball ${event.over}.${event.ball}: ${event.bowler} to ${event.batsman} — ${
+      event.type === "wicket"
+        ? `WICKET (${event.wicket_type})`
+        : event.runs === 6 ? "SIX!"
+        : event.runs === 4 ? "FOUR!"
+        : `${event.runs} run(s)`
+    }
+Generate commentary now.`;
+
+    const stream = await anthropic.messages.stream({
+      model: "claude-sonnet-4-6",
+      max_tokens: 80,
+      system: PERSONA_PROMPTS[persona],
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    let commentary = "";
+    for await (const chunk of stream) {
+      if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
+        commentary += chunk.delta.text;
+      }
+    }
+
+    return commentary.trim();
+  }
+}
+
 async function streamCommentary(event: typeof FAKE_EVENTS[0], persona: string) {
   const prompt = `Match: India vs Pakistan T20
 Score: 87/2 in ${event.over}.${event.ball} overs (RR: 8.2)
