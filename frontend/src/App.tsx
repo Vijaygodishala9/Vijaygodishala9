@@ -10,12 +10,13 @@ import { useState, useEffect, useRef, useCallback } from "react";
 type Persona = "casual_hype" | "stats_nerd";
 
 interface Batter {
-  name:       string;
-  runs:       number;
-  balls:      number;
-  fours:      number;
-  sixes:      number;
-  on_strike?: boolean;
+  name:        string;
+  runs:        number;
+  balls:       number;
+  fours:       number;
+  sixes:       number;
+  strikeRate?: number;
+  on_strike?:  boolean;
 }
 
 interface Bowler {
@@ -564,10 +565,33 @@ export default function App() {
   const [matchState,     setMatchState]     = useState<MatchState | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem("cdo"));
   const [activeTab,      setActiveTab]      = useState<"feed" | "scorecard">("feed");
+  const [lastUpdated,    setLastUpdated]    = useState<number>(0);
+  const [secondsAgo,     setSecondsAgo]     = useState(0);
+  const [scoreFlash,     setScoreFlash]     = useState(false);
+  const prevScoreRef = useRef<string>("");
 
-  // Stable ref so SSE effects (run once) always call the latest setter
-  const setMatchStateRef = useRef(setMatchState);
-  setMatchStateRef.current = setMatchState;
+  // Count up seconds since last state update
+  useEffect(() => {
+    if (!lastUpdated) return;
+    setSecondsAgo(0);
+    const t = setInterval(() => setSecondsAgo(s => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [lastUpdated]);
+
+  // Intercept state updates to track recency and flash on score change
+  const handleMatchState = useCallback((s: any) => {
+    setMatchState(s);
+    setLastUpdated(Date.now());
+    const key = `${s?.score?.home?.runs}/${s?.score?.home?.wickets}|${s?.score?.away?.runs}/${s?.score?.away?.wickets}`;
+    if (prevScoreRef.current && prevScoreRef.current !== key) {
+      setScoreFlash(true);
+      setTimeout(() => setScoreFlash(false), 900);
+    }
+    prevScoreRef.current = key;
+  }, []);
+
+  const setMatchStateRef = useRef(handleMatchState);
+  setMatchStateRef.current = handleMatchState;
 
   const hype  = usePersonaFeed("casual_hype", setMatchStateRef);
   const stats = usePersonaFeed("stats_nerd",  setMatchStateRef);
@@ -591,6 +615,8 @@ export default function App() {
         @keyframes badgePulse { 0%{transform:scale(1);box-shadow:0 0 0 0 var(--glow)} 35%{transform:scale(1.2);box-shadow:0 0 0 7px var(--glow)} 100%{transform:scale(1);box-shadow:0 0 0 0 transparent} }
         @keyframes dotBlink   { 0%,100%{opacity:1} 50%{opacity:.25} }
         @keyframes cursorBlink{ 0%,100%{opacity:.5} 50%{opacity:0} }
+        @keyframes scoreFlash { 0%{box-shadow:0 0 0 2px rgba(78,204,163,.7),inset 0 0 20px rgba(78,204,163,.12)} 100%{box-shadow:none,inset 0 0 0 transparent} }
+        .score-flash { animation: scoreFlash .9s ease-out forwards }
         .slide-in   { animation: slideIn .36s cubic-bezier(.22,1,.36,1) both }
         .badge-pulse{ animation: badgePulse .8s cubic-bezier(.22,1,.36,1) both }
         .feed-item:not(:last-child){ border-bottom:1px solid rgba(255,255,255,.05) }
@@ -634,80 +660,200 @@ export default function App() {
           const away = matchState.score.away;
           const homeHasBatted = home.overs !== "0" || home.runs > 0;
           const awayHasBatted = away.overs !== "0" || away.runs > 0;
+          const isLive = matchState.status.toLowerCase().includes("play") ||
+                         matchState.status.toLowerCase().includes("live") ||
+                         matchState.status.toLowerCase().includes("progress");
+
+          // Determine which team is batting for batter card display
+          const battingHome = homeHasBatted && !awayHasBatted;
+
+          // Chase info (2nd innings)
+          const chasing = homeHasBatted && awayHasBatted;
+          const target  = chasing ? home.runs + 1 : null;
+          const needed  = target ? target - away.runs : null;
+          const ballsLeft = chasing
+            ? Math.max(0, (20 - parseFloat(away.overs.replace(/\.(\d)/, (_, b) => `.${parseInt(b) / 6}`))) * 6)
+            : null;
+          const rrr = (needed && ballsLeft && ballsLeft > 0)
+            ? ((needed * 6) / ballsLeft).toFixed(2)
+            : null;
+
           return (
-            <div style={{ background: "#0E1117", borderRadius: 12, overflow: "hidden", marginBottom: 14, border: "1px solid rgba(255,255,255,.07)" }}>
-              {/* Match title */}
-              <div style={{ padding: "10px 18px 8px", background: "linear-gradient(135deg,#111620,#161B28)", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
-                <div style={{ fontSize: 11, color: "#5A6478", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 10 }}>
+            <div
+              className={scoreFlash ? "score-flash" : ""}
+              style={{
+                background: "#0E1117", borderRadius: 12, overflow: "hidden",
+                marginBottom: 14, border: "1px solid rgba(255,255,255,.07)",
+                transition: "box-shadow .1s",
+              }}
+            >
+              {/* ── Top bar: match info + update time ── */}
+              <div style={{
+                padding: "8px 16px",
+                background: "linear-gradient(135deg,#111620,#161B28)",
+                borderBottom: "1px solid rgba(255,255,255,.06)",
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}>
+                <div style={{ fontSize: 11, color: "#5A6478", letterSpacing: ".07em", textTransform: "uppercase" }}>
                   {matchState.homeTeam.name} vs {matchState.awayTeam.name} · IPL T20
                 </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{
+                    width: 5, height: 5, borderRadius: "50%", flexShrink: 0,
+                    background: isLive ? "#4ECCA3" : "#F0B942",
+                    display: "inline-block",
+                    animation: isLive ? "dotBlink 1.4s ease infinite" : "none",
+                  }}/>
+                  <span style={{ fontSize: 10, color: isLive ? "#4ECCA3" : "#F0B942", fontFamily: "'DM Mono',monospace" }}>
+                    {matchState.status}
+                  </span>
+                  {lastUpdated > 0 && (
+                    <span style={{ fontSize: 10, color: "#3A4050", marginLeft: 4 }}>
+                      · {secondsAgo < 5 ? "just now" : `${secondsAgo}s ago`}
+                    </span>
+                  )}
+                </div>
+              </div>
 
-                {/* Home team row */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                    <span style={{ fontSize: 15, fontWeight: 700, color: "#F0F4FF", minWidth: 36 }}>
+              {/* ── Scores ── */}
+              <div style={{ padding: "14px 16px 10px", background: "linear-gradient(180deg,#0E1117,#0B0E14)" }}>
+
+                {/* Home row */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: "#F0F4FF", minWidth: 34, letterSpacing: ".03em" }}>
                       {matchState.homeTeam.abbreviation}
                     </span>
                     {homeHasBatted ? (
-                      <span style={{ fontSize: 28, fontWeight: 700, fontFamily: "'DM Mono',monospace", letterSpacing: "-.5px" }}>
-                        <AnimatedNumber value={home.runs} />
-                        <span style={{ fontSize: 20, color: "#5A6478" }}>/<AnimatedNumber value={home.wickets} /></span>
-                      </span>
+                      <>
+                        <span style={{ fontSize: 32, fontWeight: 700, fontFamily: "'DM Mono',monospace", lineHeight: 1, letterSpacing: "-.5px" }}>
+                          <AnimatedNumber value={home.runs} />
+                          <span style={{ fontSize: 22, color: "#5A6478" }}>/<AnimatedNumber value={home.wickets} /></span>
+                        </span>
+                        <span style={{ fontSize: 12, color: "#5A6478", fontFamily: "'DM Mono',monospace" }}>
+                          ({home.overs} ov)
+                        </span>
+                      </>
                     ) : (
                       <span style={{ fontSize: 13, color: "#3A4050" }}>Yet to bat</span>
                     )}
-                    {homeHasBatted && (
-                      <span style={{ fontSize: 12, color: "#5A6478", fontFamily: "'DM Mono',monospace" }}>
-                        ({home.overs} ov)
-                      </span>
-                    )}
                   </div>
-                  {homeHasBatted && !awayHasBatted && (
-                    <span style={{ fontSize: 12, color: "#8892A4", fontFamily: "'DM Mono',monospace" }}>
-                      CRR <span style={{ color: "#4ECCA3" }}><AnimatedNumber value={matchState.runRate} /></span>
-                    </span>
+                  {battingHome && (
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 10, color: "#5A6478", textTransform: "uppercase", letterSpacing: ".06em" }}>CRR</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#4ECCA3" }}>
+                        <AnimatedNumber value={matchState.runRate} />
+                      </div>
+                    </div>
                   )}
                 </div>
 
-                {/* Away team row */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                    <span style={{ fontSize: 15, fontWeight: 700, color: "#F0F4FF", minWidth: 36 }}>
+                {/* Away row */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: chasing ? 10 : 0 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: "#F0F4FF", minWidth: 34, letterSpacing: ".03em" }}>
                       {matchState.awayTeam.abbreviation}
                     </span>
                     {awayHasBatted ? (
-                      <span style={{ fontSize: 28, fontWeight: 700, fontFamily: "'DM Mono',monospace", letterSpacing: "-.5px" }}>
-                        <AnimatedNumber value={away.runs} />
-                        <span style={{ fontSize: 20, color: "#5A6478" }}>/<AnimatedNumber value={away.wickets} /></span>
-                      </span>
+                      <>
+                        <span style={{ fontSize: 32, fontWeight: 700, fontFamily: "'DM Mono',monospace", lineHeight: 1, letterSpacing: "-.5px" }}>
+                          <AnimatedNumber value={away.runs} />
+                          <span style={{ fontSize: 22, color: "#5A6478" }}>/<AnimatedNumber value={away.wickets} /></span>
+                        </span>
+                        <span style={{ fontSize: 12, color: "#5A6478", fontFamily: "'DM Mono',monospace" }}>
+                          ({away.overs} ov)
+                        </span>
+                      </>
                     ) : (
                       <span style={{ fontSize: 13, color: "#3A4050" }}>Yet to bat</span>
                     )}
-                    {awayHasBatted && (
-                      <span style={{ fontSize: 12, color: "#5A6478", fontFamily: "'DM Mono',monospace" }}>
-                        ({away.overs} ov)
-                      </span>
-                    )}
                   </div>
-                  {awayHasBatted && (
-                    <span style={{ fontSize: 12, color: "#8892A4", fontFamily: "'DM Mono',monospace" }}>
-                      CRR <span style={{ color: "#4ECCA3" }}><AnimatedNumber value={matchState.runRate} /></span>
-                    </span>
+                  {chasing && rrr && (
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 10, color: "#5A6478", textTransform: "uppercase", letterSpacing: ".06em" }}>RRR</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: parseFloat(rrr) > 12 ? "#E24B4A" : "#F0B942" }}>
+                        {rrr}
+                      </div>
+                    </div>
                   )}
                 </div>
+
+                {/* Chase summary */}
+                {chasing && needed != null && (
+                  <div style={{
+                    padding: "8px 12px", borderRadius: 8,
+                    background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.06)",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                    <span style={{ fontSize: 12, color: "#8892A4" }}>
+                      Need <span style={{ color: "#F0F4FF", fontWeight: 700 }}>{needed}</span> off {ballsLeft} balls
+                    </span>
+                    <span style={{ fontSize: 11, color: "#5A6478" }}>Target {target}</span>
+                  </div>
+                )}
               </div>
 
-              {/* Status bar */}
-              <div style={{ padding: "8px 18px", display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{
-                  width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-                  background: matchState.status.toLowerCase().includes("live") ||
-                               matchState.status.toLowerCase().includes("progress")
-                    ? "#4ECCA3" : "#F0B942",
-                  display: "inline-block",
-                }}/>
-                <span style={{ fontSize: 11, color: "#8892A4" }}>{matchState.status}</span>
-              </div>
+              {/* ── Live batter cards ── */}
+              {(matchState.batters ?? []).length > 0 && (
+                <div style={{
+                  borderTop: "1px solid rgba(255,255,255,.06)",
+                  display: "grid",
+                  gridTemplateColumns: `repeat(${Math.min(matchState.batters!.length, 2)}, 1fr)`,
+                }}>
+                  {(matchState.batters ?? []).slice(0, 2).map((b, i) => {
+                    const sr = b.strikeRate ?? (b.balls > 0 ? +((b.runs / b.balls) * 100).toFixed(1) : 0);
+                    return (
+                      <div key={b.name} style={{
+                        padding: "10px 14px",
+                        borderRight: i === 0 && (matchState.batters?.length ?? 0) > 1
+                          ? "1px solid rgba(255,255,255,.06)" : "none",
+                      }}>
+                        <div style={{ fontSize: 11, color: "#8892A4", marginBottom: 4, fontWeight: 500 }}>
+                          {b.name}
+                          <span style={{
+                            marginLeft: 5, fontSize: 9, fontWeight: 700, padding: "1px 5px",
+                            borderRadius: 3, background: "rgba(78,204,163,.15)", color: "#4ECCA3",
+                            letterSpacing: ".05em",
+                          }}>batting</span>
+                        </div>
+                        <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+                          <span style={{ fontSize: 24, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#F0F4FF" }}>
+                            <AnimatedNumber value={b.runs} />
+                            <span style={{ fontSize: 14, color: "#4ECCA3" }}>*</span>
+                          </span>
+                          <span style={{ fontSize: 11, color: "#5A6478", fontFamily: "'DM Mono',monospace" }}>
+                            {b.balls}b
+                          </span>
+                          <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: sr >= 150 ? "#4ECCA3" : sr >= 100 ? "#F0B942" : "#5A6478" }}>
+                            SR <AnimatedNumber value={sr} />
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                          {b.fours > 0 && <span style={{ fontSize: 10, color: "#4ECCA3" }}>{b.fours}×4</span>}
+                          {b.sixes > 0 && <span style={{ fontSize: 10, color: "#F0B942" }}>{b.sixes}×6</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* ── Current bowlers ── */}
+              {(matchState.bowlers ?? []).length > 0 && (
+                <div style={{
+                  borderTop: "1px solid rgba(255,255,255,.05)",
+                  padding: "8px 14px",
+                  display: "flex", gap: 16,
+                }}>
+                  <span style={{ fontSize: 10, color: "#3A4050", textTransform: "uppercase", letterSpacing: ".06em", alignSelf: "center" }}>Bowling</span>
+                  {(matchState.bowlers ?? []).slice(0, 2).map(b => (
+                    <span key={b.name} style={{ fontSize: 11, color: "#5A6478", fontFamily: "'DM Mono',monospace" }}>
+                      {b.name.split(" ").pop()} <span style={{ color: "#8892A4" }}>{b.overs}-{b.runs}-{b.wickets}</span>
+                      <span style={{ color: "#3A4050", fontSize: 10 }}> (eco {b.economy})</span>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })() : (
