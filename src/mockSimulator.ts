@@ -145,4 +145,7 @@ async function runSimulator() {
   console.log("\n✅ Simulation complete.");
 }
 
-runSimulator().catch(console.error);
+// Only run as CLI, not when imported as a module
+if (require.main === module) {
+  runSimulator().catch(console.error);
+}

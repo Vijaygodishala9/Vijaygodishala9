@@ -22,6 +22,10 @@ interface NormalisedMatchState {
   status:     string;
   batters?:   Array<{ name: string; runs: number; balls: number; fours: number; sixes: number; strikeRate: number }>;
   bowlers?:   Array<{ name: string; overs: string; wickets: number; runs: number; economy: number }>;
+  /** Upcoming batters for the batting team (not yet at the crease) */
+  yetToBat?:  Array<{ name: string; role: string }>;
+  /** Full batting lineup for the team not yet batting */
+  awaySquad?: Array<{ name: string; role: string }>;
   raw?: unknown;
 }
 
@@ -89,6 +93,30 @@ function normalizeHighlightlyState(raw: any, matchKey: string): NormalisedMatchS
     economy:  b.player?.statistics?.economy ?? 0,
   }));
 
+  // Upcoming batters — from the first-innings batting list, excluding those already at crease
+  const inningStats = (raw.statistics ?? []).find((s: any) => s.inningNumber === 1);
+  const inningBatsmen: any[] = inningStats?.team?.inningBatsmen ?? [];
+  const currentBatterNames = new Set(batters.map((b) => b.name));
+  const yetToBat = inningBatsmen
+    .filter((b: any) => b.runs === null && b.dismissalStatus === null && !currentBatterNames.has(b.player?.name))
+    .map((b: any) => ({
+      name: b.player?.name ?? "Unknown",
+      role: (b.player?.roles ?? [])[0] ?? "",
+    }));
+
+  // Away squad — only include when the away team hasn't batted yet
+  const awayTeamId = String(raw.awayTeam?.id ?? "");
+  let awaySquad: Array<{ name: string; role: string }> | undefined;
+  if (awayParsed.runs === 0 && awayOvers === "0") {
+    const squadEntry = (raw.squad ?? []).find((s: any) => String(s.team?.id ?? "") === awayTeamId);
+    if (squadEntry) {
+      awaySquad = (squadEntry.players ?? []).map((p: any) => ({
+        name: p.name ?? "Unknown",
+        role: (p.roles ?? [])[0] ?? "",
+      }));
+    }
+  }
+
   return {
     matchKey,
     homeTeam,
@@ -101,6 +129,8 @@ function normalizeHighlightlyState(raw: any, matchKey: string): NormalisedMatchS
     status: raw.state?.description ?? "Unknown",
     batters,
     bowlers,
+    yetToBat,
+    awaySquad,
     raw,
   };
 }
@@ -108,24 +138,33 @@ function normalizeHighlightlyState(raw: any, matchKey: string): NormalisedMatchS
 // ─── State-diff helpers ───────────────────────────────────────────────────────
 
 interface ScoreSnapshot {
-  homeRuns: number;
+  homeRuns:    number;
   homeWickets: number;
-  awayRuns: number;
+  homeOvers:   string;
+  awayRuns:    number;
   awayWickets: number;
+  awayOvers:   string;
+  /** Total balls faced by the current at-crease batters — used to detect dot balls */
+  totalBalls:  number;
 }
 
 function extractSnapshot(state: NormalisedMatchState): ScoreSnapshot {
+  const totalBalls = (state.batters ?? []).reduce((s, b) => s + b.balls, 0);
   return {
-    homeRuns:     state.score.home.runs,
-    homeWickets:  state.score.home.wickets,
-    awayRuns:     state.score.away.runs,
-    awayWickets:  state.score.away.wickets,
+    homeRuns:    state.score.home.runs,
+    homeWickets: state.score.home.wickets,
+    homeOvers:   state.score.home.overs,
+    awayRuns:    state.score.away.runs,
+    awayWickets: state.score.away.wickets,
+    awayOvers:   state.score.away.overs,
+    totalBalls,
   };
 }
 
 interface CommentaryTrigger {
-  type: "wicket" | "boundary";
+  type: "wicket" | "six" | "boundary" | "runs" | "dot_ball" | "over_complete";
   runs?: number;
+  balls?: number;
   team: string;
   batters: string[];
   bowlers: string[];
@@ -135,36 +174,49 @@ interface CommentaryTrigger {
   runRate: string;
 }
 
-/** Returns a trigger if the state diff warrants commentary, otherwise null */
+/** Returns a trigger for every detected ball event, otherwise null */
 function detectTrigger(
   prev: ScoreSnapshot,
   curr: NormalisedMatchState,
 ): CommentaryTrigger | null {
-  const snap = extractSnapshot(curr);
-  const homeRunDiff = snap.homeRuns - prev.homeRuns;
-  const awayRunDiff = snap.awayRuns - prev.awayRuns;
+  const snap        = extractSnapshot(curr);
+  const homeRunDiff = snap.homeRuns    - prev.homeRuns;
+  const awayRunDiff = snap.awayRuns    - prev.awayRuns;
   const homeWktDiff = snap.homeWickets - prev.homeWickets;
   const awayWktDiff = snap.awayWickets - prev.awayWickets;
+  const ballDiff    = snap.totalBalls  - prev.totalBalls;
+  const homeOversChanged = snap.homeOvers !== prev.homeOvers;
+  const awayOversChanged = snap.awayOvers !== prev.awayOvers;
 
   const batterNames = (curr.batters ?? []).map((b) => b.name);
   const bowlerNames = (curr.bowlers ?? []).map((b) => b.name);
 
   const homeScore = `${snap.homeRuns}/${snap.homeWickets} (${curr.score.home.overs} ov)`;
   const awayScore = `${snap.awayRuns}/${snap.awayWickets} (${curr.score.away.overs} ov)`;
-  const scoreStr = `${curr.homeTeam.abbreviation}: ${homeScore}  ${curr.awayTeam.abbreviation}: ${awayScore}`;
+  const scoreStr  = `${curr.homeTeam.abbreviation}: ${homeScore}  ${curr.awayTeam.abbreviation}: ${awayScore}`;
+  const base = { batters: batterNames, bowlers: bowlerNames, homeTeam: curr.homeTeam.name, awayTeam: curr.awayTeam.name, score: scoreStr, runRate: curr.runRate };
 
-  if (homeWktDiff > 0) {
-    return { type: "wicket", team: curr.homeTeam.name, batters: batterNames, bowlers: bowlerNames, homeTeam: curr.homeTeam.name, awayTeam: curr.awayTeam.name, score: scoreStr, runRate: curr.runRate };
+  // ── Wicket (highest priority) ──────────────────────────────────────────────
+  if (homeWktDiff > 0) return { type: "wicket", team: curr.homeTeam.name, balls: ballDiff, ...base };
+  if (awayWktDiff > 0) return { type: "wicket", team: curr.awayTeam.name, balls: ballDiff, ...base };
+
+  // ── Run-based events ───────────────────────────────────────────────────────
+  const runDiff = homeRunDiff > 0 ? homeRunDiff : awayRunDiff;
+  const team    = homeRunDiff > 0 ? curr.homeTeam.name : curr.awayTeam.name;
+
+  if (runDiff >= 6) return { type: "six",      runs: runDiff, balls: ballDiff || 1, team, ...base };
+  if (runDiff >= 4) return { type: "boundary", runs: runDiff, balls: ballDiff || 1, team, ...base };
+  if (runDiff >  0) return { type: "runs",     runs: runDiff, balls: ballDiff || 1, team, ...base };
+
+  // ── Dot ball (balls delivered but no run, no wicket) ──────────────────────
+  if (ballDiff > 0) return { type: "dot_ball", runs: 0, balls: ballDiff, team: curr.homeTeam.name, ...base };
+
+  // ── Over complete (overs counter flipped but we missed the individual balls) ─
+  if (homeOversChanged || awayOversChanged) {
+    const t = homeOversChanged ? curr.homeTeam.name : curr.awayTeam.name;
+    return { type: "over_complete", team: t, ...base };
   }
-  if (awayWktDiff > 0) {
-    return { type: "wicket", team: curr.awayTeam.name, batters: batterNames, bowlers: bowlerNames, homeTeam: curr.homeTeam.name, awayTeam: curr.awayTeam.name, score: scoreStr, runRate: curr.runRate };
-  }
-  if (homeRunDiff >= 4) {
-    return { type: "boundary", runs: homeRunDiff, team: curr.homeTeam.name, batters: batterNames, bowlers: bowlerNames, homeTeam: curr.homeTeam.name, awayTeam: curr.awayTeam.name, score: scoreStr, runRate: curr.runRate };
-  }
-  if (awayRunDiff >= 4) {
-    return { type: "boundary", runs: awayRunDiff, team: curr.awayTeam.name, batters: batterNames, bowlers: bowlerNames, homeTeam: curr.homeTeam.name, awayTeam: curr.awayTeam.name, score: scoreStr, runRate: curr.runRate };
-  }
+
   return null;
 }
 
@@ -172,21 +224,25 @@ function buildPrompt(trigger: CommentaryTrigger): string {
   const eventLine =
     trigger.type === "wicket"
       ? `WICKET! ${trigger.team} lose a wicket.`
-      : `BOUNDARY! ${trigger.runs} runs scored by ${trigger.team}.`;
+      : trigger.type === "six"
+        ? `SIX! A massive hit for ${trigger.runs} runs by ${trigger.team}.`
+        : trigger.type === "boundary"
+          ? `FOUR! A ${trigger.runs}-run boundary for ${trigger.team}.`
+          : trigger.type === "runs"
+            ? `${trigger.runs} run${trigger.runs !== 1 ? "s" : ""} taken by ${trigger.team} off ${trigger.balls ?? 1} ball${(trigger.balls ?? 1) !== 1 ? "s" : ""}.`
+            : trigger.type === "dot_ball"
+              ? `Dot ball! ${trigger.balls && trigger.balls > 1 ? trigger.balls + " dot balls in a row." : "No run taken."}`
+              : `Over complete. ${trigger.team} have bowled a full over.`;
 
-  const battersLine = trigger.batters.length
-    ? `Batters at crease: ${trigger.batters.join(", ")}.`
-    : "";
-  const bowlersLine = trigger.bowlers.length
-    ? `Current bowler(s): ${trigger.bowlers.join(", ")}.`
-    : "";
+  const battersLine = trigger.batters.length ? `Batters: ${trigger.batters.join(", ")}.` : "";
+  const bowlersLine = trigger.bowlers.length ? `Bowler: ${trigger.bowlers[0]}.` : "";
 
   return `Match: ${trigger.homeTeam} vs ${trigger.awayTeam} (IPL T20)
 Score: ${trigger.score}  |  CRR: ${trigger.runRate}
 ${eventLine}
 ${battersLine}
 ${bowlersLine}
-Generate commentary now.`;
+Give 1-2 sentence ball commentary. Be vivid and brief.`;
 }
 
 // ─── MatchRegistry ────────────────────────────────────────────────────────────
@@ -196,7 +252,7 @@ export class MatchRegistry {
   private publicStatePollers: Map<string, NodeJS.Timeout> = new Map();
   private lastPublicState: Map<string, string> = new Map();
   private lastScoreSnapshot: Map<string, ScoreSnapshot> = new Map();
-  private readonly PUBLIC_POLL_INTERVAL_MS = 30_000;
+  private readonly PUBLIC_POLL_INTERVAL_MS = 6_000;
   private broadcaster: CommentaryBroadcaster;
   private push: PushService;
   private fallbackOnly: boolean;
@@ -361,7 +417,9 @@ export class MatchRegistry {
     for (const url of candidates) {
       try {
         const res = await axios.get(url, { headers, timeout: 10_000 });
-        const raw = res.data?.data ?? res.data;
+        const rawData = res.data?.data ?? res.data;
+        // API sometimes returns a single-element array — unwrap it
+        const raw = Array.isArray(rawData) ? rawData[0] : rawData;
         if (!raw) {
           if (res.status === 200) return res.data;
           continue;
@@ -415,10 +473,18 @@ export class MatchRegistry {
         const systemPrompt = PERSONA_PROMPTS[persona];
         if (!systemPrompt) return;
 
+        const maxTokens =
+          trigger.type === "wicket"       ? 100 :
+          trigger.type === "six"          ? 80  :
+          trigger.type === "boundary"     ? 70  :
+          trigger.type === "runs"         ? 50  :
+          trigger.type === "dot_ball"     ? 35  :
+          60; // over_complete
+
         try {
           const stream = await this.anthropic.messages.stream({
             model: "claude-sonnet-4-6",
-            max_tokens: 80,
+            max_tokens: maxTokens,
             system: systemPrompt,
             messages: [{ role: "user", content: prompt }],
           });
@@ -436,6 +502,8 @@ export class MatchRegistry {
           this.broadcaster.broadcastToPersona(matchKey, persona, "token", {
             token:     "",
             eventType: trigger.type,
+            runs:      trigger.runs,
+            balls:     trigger.balls,
           });
         } catch (err: any) {
           console.warn(`[Registry] Claude stream error for persona ${persona}:`, err?.message ?? err);
