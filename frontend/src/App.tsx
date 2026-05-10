@@ -58,7 +58,7 @@ interface CommentaryLine {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const MATCH_KEY = (import.meta as any).env?.VITE_MATCH_KEY ?? "indpak_2024_t20_01";
+const MATCH_KEY = (import.meta as any).env?.VITE_MATCH_KEY ?? "$m.id";
 const SERVER    = (import.meta as any).env?.VITE_SERVER_URL ?? "http://localhost:3001";
 
 const PERSONAS: { id: Persona; label: string; desc: string; accent: string }[] = [
